@@ -1,101 +1,104 @@
-use std::{collections::HashMap, io::{BufRead, BufReader, Error, Read, Write}, marker::PhantomData, net::TcpStream, thread::sleep, time::Duration};
-use tungstenite::{handshake::{headers::MAX_HEADERS, server::Response}, http};
-use url::Url;
+use crate::{
+    client::WebSocket,
+    error::StreamError,
+    transport::{Framed, Transport},
+};
+use bytes::BytesMut;
+use log::info;
+use std::{
+    io::{ErrorKind, Read, Write},
+    thread::sleep,
+    time::Duration,
+};
 
-use crate::{client::WebSocket, error::StreamError, transport::{Framed, Transport}};
-
-pub struct HandshakeResponse {
-    pub version: u8,
-    pub status_code: u16,
-    pub reason_phrase: String,
-    pub headers: HashMap<String, String>,
+pub enum HandshakeState {
+    Sending { request: Vec<u8>, offset: usize },
+    Flushing,
+    Receiving { buf: BytesMut },
+    Done,
 }
 
-impl HandshakeResponse {
-    pub fn from_raw(raw: &[u8]) -> Result<Self, StreamError> {
-        let mut headers_storage = [httparse::EMPTY_HEADER; MAX_HEADERS];
-        let mut res = httparse::Response::new(&mut headers_storage);
+pub struct HandshakeClient {
+    state: HandshakeState,
+}
 
-        let status = res.parse(raw)
-            .map_err(|_| StreamError::InvalidRequest)?;
-        if !status.is_complete() {
-            return Err(StreamError::InvalidRequest);
+impl HandshakeClient {
+    pub fn new(url: &str) -> Self {
+        let parsed = url::Url::parse(url)
+            .expect("Invalid URL for WebSocket handshake");
+        let host = parsed.host_str().unwrap_or("localhost");
+
+        let mut request = Vec::new();
+        let path = parsed.path();
+        write!(request, "GET {} HTTP/1.1\r\n", path).unwrap();
+        write!(request, "Host: {}\r\n", host).unwrap();
+        write!(request, "Upgrade: websocket\r\n").unwrap();
+        write!(request, "Connection: Upgrade\r\n").unwrap();
+        write!(request, "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n").unwrap();
+        write!(request, "Origin: {}\r\n", host).unwrap();
+        write!(request, "Sec-WebSocket-Version: 13\r\n").unwrap();
+        write!(request, "\r\n").unwrap();
+
+        HandshakeClient {
+            state: HandshakeState::Sending { request, offset: 0 },
         }
-
-
-        let status = res.code.unwrap();
-        let version = res.version.unwrap();
-        let reason = res.reason.unwrap().to_string();
-
-        let mut headers = HashMap::new();
-
-        for h in res.headers.iter() {
-            let key = h.name.to_string();
-            let val = String::from_utf8_lossy(h.value).into_owned();
-            println!("Headers: {}:{}", key, val);
-
-            headers.insert(key, val);
-        }
-
-        Ok(Self {
-            version,
-            status_code: status,
-            reason_phrase: reason,
-            headers
-        })
     }
-}
 
+    pub fn handshake<S: Transport>(mut self, mut stream: S) -> Result<WebSocket<S>, StreamError> {
+        loop {
+            match &mut self.state {
+                HandshakeState::Sending { request, offset } => {
+                    match stream.write(&request[*offset..]) {
+                        Ok(0) => {
+                            return Err(StreamError::ConnectionClosed);
+                        }
+                        Ok(n) => {
+                            *offset += n;
+                            info!("Sent {} bytes of {}", *offset, request.len());
+                            if *offset >= request.len() {
+                                self.state = HandshakeState::Flushing;
+                            }
+                        }
+                        Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
+                            // Can't write now, retry shortly
+                            sleep(Duration::from_millis(5));
+                        }
+                        Err(e) => return Err(StreamError::Io(e)),
+                    }
+                }
 
-// TODO: We need to make this non-blocking
-pub fn client_handshake<S: Transport>(mut stream: S, url: &Url) -> Result<WebSocket<S>, StreamError> {
-    let mut headers = String::new();
-    headers.push_str("GET / HTTP/1.1\n");
-    headers.push_str("Host: localhost\n");
-    headers.push_str("Upgrade: websocket\n");
-    headers.push_str("Connection: Upgrade\n");   
-    headers.push_str("Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\n");
-    headers.push_str("Origin: 127.0.0.1\n");
-    headers.push_str("Sec-WebSocket-Version: 13\n");
-    headers.push_str("\r\n");
+                HandshakeState::Flushing => {
+                    stream.flush()?;
+                    info!("Flushed handshake request");
+                    self.state = HandshakeState::Receiving { buf: BytesMut::with_capacity(1024) };
+                }
 
-    // Lets do not blocking way
-    stream.write_all(&headers.as_bytes()).unwrap();
+                HandshakeState::Receiving { buf } => {
+                    let mut tmp = [0_u8; 1024];
+                    match stream.read(&mut tmp) {
+                        Ok(0) => return Err(StreamError::ConnectionClosed),
+                        Ok(n) => {
+                            buf.extend_from_slice(&tmp[..n]);
+                            info!("Received {} bytes", n);
+                        }
+                        Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
+                            sleep(Duration::from_millis(5));
+                            continue;
+                        }
+                        Err(e) => return Err(StreamError::Io(e)),
+                    }
 
-    let mut reader = BufReader::new(&mut stream);
-    let mut raw = Vec::new();
-    let mut buf = [0u8; 4096];
+                    if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        info!("End of handshake response detected");
+                        self.state = HandshakeState::Done;
+                    }
+                }
 
-    loop {
-        match reader.read(&mut buf) {
-            Ok(0) => return Err(StreamError::InvalidRequest),
-            Ok(n) => raw.extend_from_slice(&buf[..n]),
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                sleep(Duration::from_millis(50));
-                continue;
+                HandshakeState::Done => {
+                    let framed = Framed::new(stream);
+                    return Ok(WebSocket::new(framed));
+                }
             }
-            Err(_) => return Err(StreamError::InvalidRequest),
-        }
-
-        if raw.windows(4).any(|w| w == b"\r\n\r\n") {
-            break;
         }
     }
-
-
-    let resp = HandshakeResponse::from_raw(&raw).unwrap();
-
-    // TODO: Perform validation on response
-    
-    // let method = resp.method.unwrap();
-    // if method != "GET" {
-    //     println!("Response method is incorrect");
-    // }
-
-    let version = resp.version;
-    println!("Got version: {}", version);
-
-    let framed = Framed::new(stream);
-
-    Ok(WebSocket::new(framed))
 }

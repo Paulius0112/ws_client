@@ -1,6 +1,7 @@
 use thiserror::Error;
+use log::info;
 
-
+#[allow(dead_code)]
 #[derive(Debug)]
 pub enum OpCode {
     Continuation = 0x00,
@@ -11,9 +12,10 @@ pub enum OpCode {
     Ping = 0x09,
     Pong = 0x0A,
     Control = 0x0B,
-    NotImplemented
+    NotImplemented,
 }
 
+#[allow(dead_code)]
 impl From<u8> for OpCode {
     fn from(value: u8) -> Self {
         match value {
@@ -22,22 +24,24 @@ impl From<u8> for OpCode {
             0x08 => OpCode::Close,
             0x09 => OpCode::Ping,
             0x0A => OpCode::Pong,
-            0x03 | 0x04 | 0x05 | 0x06 | 0x07 => OpCode::Reserved,
-            0x0B | 0x0C | 0x0D | 0x0E | 0x0F => OpCode::Control,
-            _ => OpCode::NotImplemented
+            0x03..=0x07 => OpCode::Reserved,
+            0x0B..=0x0F => OpCode::Control,
+            _ => OpCode::NotImplemented,
         }
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct Frame {
     pub fin: bool,
     pub opcode: OpCode,
     pub mask: bool,
-    pub payload: Vec<u8>
+    pub payload: Vec<u8>,
 }
 
 // TODO: We might not need this anymore
+#[allow(dead_code)]
 impl From<&Vec<u8>> for Frame {
     fn from(bytes: &Vec<u8>) -> Self {
         let b0 = bytes[0];
@@ -51,16 +55,17 @@ impl From<&Vec<u8>> for Frame {
         let len = (0b0111_1111 & b1) as usize;
 
         let payload = bytes[2..bytes.len()].to_vec();
-        
+
         Frame {
             fin,
             opcode,
             mask,
-            payload
+            payload,
         }
     }
 }
 
+#[allow(dead_code)]
 impl Frame {
     pub fn try_parse(bytes: &Vec<u8>) -> Result<Frame, FrameError> {
         if bytes.len() < 2 {
@@ -78,7 +83,7 @@ impl Frame {
         let payload = bytes[2..bytes.len()].to_vec();
 
         if len > payload.len() {
-            println!("Frame cannot be parsed yet. Need additional payload");
+            info!("Frame cannot be parsed yet. Need additional payload");
             return Err(FrameError::IncompleteFramePayload);
         }
 
@@ -86,16 +91,15 @@ impl Frame {
             fin,
             opcode,
             mask,
-            payload
+            payload,
         })
-
     }
     pub fn text(msg: String) -> Frame {
         Frame {
             fin: true,
             opcode: OpCode::Text,
             mask: false,
-            payload: msg.as_bytes().to_vec()
+            payload: msg.as_bytes().to_vec(),
         }
     }
 
@@ -109,6 +113,7 @@ impl Frame {
     }
 }
 
+#[allow(dead_code)]
 impl Frame {
     pub fn encode(&self, mask: [u8; 4]) -> Vec<u8> {
         let n: usize = self.payload.len();
@@ -118,11 +123,8 @@ impl Frame {
         let fin_bit = 0x80;
         let masked_bit = 0x80;
 
-        println!("Len of masked: {}", masked.len());
-
-        println!("Encoding the payload of lenght: {}", self.payload.len());
+        info!("Encoding the payload of lenght: {}", self.payload.len());
         for i in 0..self.payload.len() {
-            //masked[i] = self.payload[i] ^ mask[i % 4];
             let encoded = self.payload[i] ^ mask[i % 4];
             masked.push(encoded);
         }
@@ -137,21 +139,19 @@ impl Frame {
     }
 
     pub fn decode(bytes: &Vec<u8>) -> Result<Frame, FrameError> {
-
-
-        println!("Got bytes in decode: {}", bytes.len());
+        info!("Got bytes in decode: {}", bytes.len());
         let frame: Frame = bytes.into();
 
         if frame.mask {
-            println!("Frame is masked. Wrong");
-            return Err(FrameError::MaskedResponse)
+            info!("Frame is masked. Wrong");
+            return Err(FrameError::MaskedResponse);
         }
 
         Ok(frame)
-    } 
-
+    }
 }
 
+#[allow(dead_code)]
 #[derive(Error, Debug)]
 pub enum FrameError {
     #[error("Response is masked. Invalid")]
@@ -165,5 +165,4 @@ pub enum FrameError {
 
     #[error("Frame payload is not complete")]
     IncompleteFramePayload,
-
 }

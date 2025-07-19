@@ -1,13 +1,17 @@
-use std::{error::Error, net::TcpStream, time::Duration};
+use std::{net::TcpStream, time::Duration};
 
+use crate::{frame::Frame, handshake::HandshakeClient};
 use thiserror::Error;
 use tungstenite::http::HeaderMap;
 use url::Url;
-use crate::frame::Frame;
+use crate::{
+    error::StreamError,
+    message::Message,
+    transport::{Framed, Transport},
+};
+use log::info;
 
-use crate::{error::StreamError, handshake::client_handshake, message::Message, transport::{Framed, Transport}};
-
-
+#[allow(dead_code)]
 pub enum SocketState {
     Init,
     Connecting,
@@ -15,30 +19,29 @@ pub enum SocketState {
     Close,
 }
 
-pub struct WebSocket<T: Transport>
-{
+#[allow(dead_code)]
+pub struct WebSocket<T: Transport> {
     inner: Framed<T>,
-    state: SocketState
+    state: SocketState,
 }
 
-
+#[allow(dead_code)]
 impl<T: Transport> WebSocket<T> {
     pub fn new(framed: Framed<T>) -> Self {
         Self {
             inner: framed,
-            state: SocketState::Init
+            state: SocketState::Init,
         }
     }
 
     // receive and close funcs
     pub fn send(&mut self, msg: Message) {
-        // conert to frame
         let frame = match msg {
             Message::Text(string) => Frame::text(string),
             Message::Binary(binary) => Frame::binary(binary),
         };
 
-        println!("Created frame: {:?}", frame);
+        info!("Sending Frame: {:?}", frame);
 
         self.inner.send_frame(frame).unwrap();
     }
@@ -47,38 +50,35 @@ impl<T: Transport> WebSocket<T> {
         let next_frame = self.inner.next_frame().unwrap();
 
         if let Some(frame) = next_frame {
-
             let msg = match frame.opcode {
                 crate::frame::OpCode::Text => Message::text(frame.payload),
                 crate::frame::OpCode::Binary => Message::binary(frame.payload),
-                _ => unimplemented!()
+                _ => unimplemented!(),
             };
 
-            return Ok(Some(msg))
+            Ok(Some(msg))
         } else {
-            return Ok(None)
+            Ok(None)
         }
     }
 }
 
-
-
+#[allow(dead_code)]
 pub struct ClientBuilder {
     url: Url,
     timeout: Duration,
     tls: bool,
-    headers: HeaderMap
+    headers: HeaderMap,
 }
 
+#[allow(dead_code)]
 impl ClientBuilder {
     pub fn new(url: &str) -> Result<Self, ParseError> {
         let url = Url::parse(url)?;
 
         match url.scheme() {
-            "ws" | "wss" => {},
-            _ => {
-                return Err(ParseError::UnsupportedScheme(url.scheme().into()))
-            }
+            "ws" | "wss" => {}
+            _ => return Err(ParseError::UnsupportedScheme(url.scheme().into())),
         }
 
         let headers = HeaderMap::new();
@@ -87,7 +87,7 @@ impl ClientBuilder {
             url: url.clone(),
             timeout: Duration::from_secs(5),
             tls: url.scheme() == "wss",
-            headers
+            headers,
         })
     }
 
@@ -96,8 +96,7 @@ impl ClientBuilder {
         self
     }
 
-
-    pub fn header(mut self, name: &str, value: &str) -> Self {
+    pub fn header(self, name: &str, value: &str) -> Self {
         // TOPO
         self
     }
@@ -107,19 +106,15 @@ impl ClientBuilder {
         let port = self.url.port().unwrap();
 
         let endpoint = format!("{}:{}", host, port);
-        println!("Endpoint to connect: {}", endpoint);
-        let stream = TcpStream::connect(endpoint).unwrap();
-        println!("Setting stream as non blocking");
-        let _ = stream.set_nonblocking(true).unwrap();
+        info!("Endpoint to connect: {}", endpoint);
 
-        // Check for tls
-        let inner = client_handshake(stream, &self.url).unwrap();
+        let stream = TcpStream::connect(endpoint.clone()).unwrap();
+        info!("Setting stream as non blocking...");
+        stream.set_nonblocking(true).unwrap();
 
-        Ok(inner)
-
+        let machine = HandshakeClient::new(&endpoint);
+        return machine.handshake(stream)
     }
-
-    
 }
 
 #[derive(Error, Debug)]
@@ -128,5 +123,5 @@ pub enum ParseError {
     Url(#[from] url::ParseError),
 
     #[error("Unsupported scheme: {0}")]
-    UnsupportedScheme(String)
+    UnsupportedScheme(String),
 }

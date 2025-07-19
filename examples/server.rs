@@ -1,8 +1,13 @@
-use std::{net::TcpListener, thread::{sleep, spawn}, time::Duration};
+use std::{
+    net::TcpListener,
+    thread::{sleep, spawn},
+    time::Duration,
+};
 
 use tungstenite::{
     accept_hdr,
-    handshake::server::{Request, Response}, Message,
+    handshake::server::{Request, Response},
+    Message,
 };
 
 fn main() {
@@ -18,7 +23,6 @@ fn main() {
                     println!("* {header}");
                 }
 
-                // Let's add an additional header to our response to the client.
                 let headers = response.headers_mut();
                 headers.append("MyCustomHeader", ":)".parse().unwrap());
                 headers.append("SOME_TUNGSTENITE_HEADER", "header_value".parse().unwrap());
@@ -27,28 +31,16 @@ fn main() {
             };
 
             let stream = stream.unwrap();
-            
+
             let mut websocket = accept_hdr(stream, callback).unwrap();
             println!("Stream initiated");
-            loop {
-                let msg = websocket.read().unwrap();
-                println!("Got msg: {}", msg);
-                if msg.is_binary() || msg.is_text() {
-                    websocket.send(msg).unwrap();
-                }
-
-                break;
-            }
-
             println!("Continue sending messages..");
 
             loop {
-
-                let message: Message = Message::text("Testing message".to_string());
+                let message: Message = Message::text("gdgdfgdf".to_string());
                 websocket.send(message).unwrap();
                 sleep(Duration::from_secs(3));
             }
-
         });
     }
 }

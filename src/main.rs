@@ -1,16 +1,12 @@
-use tungstenite::client::IntoClientRequest;
-
 use crate::{client::ClientBuilder, message::Message};
-use log::{info};
+use log::info;
 
-
-mod stream;
-mod error;
-mod handshake;
 mod client;
-mod transport;
-mod message;
+mod error;
 mod frame;
+mod handshake;
+mod message;
+mod transport;
 
 fn main() -> std::io::Result<()> {
     env_logger::init();
@@ -28,14 +24,7 @@ fn main() -> std::io::Result<()> {
     loop {
         let msg = stream.recv().unwrap();
         if let Some(val) = msg {
-            println!("Received: {:?}", val);
-        } else {
-            println!("Empty response");
+            info!("Received: {:?}", val);
         }
-        
     }
-
-    Ok(())
-    
 }
-
