@@ -41,8 +41,6 @@ impl<T: Transport> WebSocket<T> {
             Message::Binary(binary) => Frame::binary(binary),
         };
 
-        info!("Sending Frame: {:?}", frame);
-
         self.inner.send_frame(frame).unwrap();
     }
 
@@ -91,15 +89,15 @@ impl ClientBuilder {
         })
     }
 
-    pub fn timeout(mut self, d: Duration) -> Self {
-        self.timeout = d;
-        self
-    }
+    // pub fn timeout(mut self, d: Duration) -> Self {
+    //     self.timeout = d;
+    //     self
+    // }
 
-    pub fn header(self, name: &str, value: &str) -> Self {
-        // TOPO
-        self
-    }
+    // pub fn header(self, name: &str, value: &str) -> Self {
+    //     // TOPO
+    //     self
+    // }
 
     pub fn connect(self) -> Result<WebSocket<impl Transport>, StreamError> {
         let host = self.url.host().unwrap();
@@ -113,7 +111,7 @@ impl ClientBuilder {
         stream.set_nonblocking(true).unwrap();
 
         let machine = HandshakeClient::new(&endpoint);
-        return machine.handshake(stream)
+        return Ok(machine.handshake(stream)?)
     }
 }
 

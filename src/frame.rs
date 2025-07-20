@@ -50,10 +50,6 @@ impl From<&Vec<u8>> for Frame {
         let fin = ((0b1000_0000 & b0) >> 7) == 1;
         let opcode: OpCode = (0b0000_1111 & b0).into();
         let mask = (0b1000_0000 & b1) >> 7 == 1;
-
-        // Why do I need len???
-        let len = (0b0111_1111 & b1) as usize;
-
         let payload = bytes[2..bytes.len()].to_vec();
 
         Frame {
