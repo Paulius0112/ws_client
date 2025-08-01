@@ -1,5 +1,5 @@
 use crate::{
-    client::WebSocket,
+    client::{MaybeTlsStream, WebSocket},
     transport::{Framed, Transport},
 };
 use base64::Engine;
@@ -10,7 +10,7 @@ use rand::Rng;
 use sha1::Digest;
 use thiserror::Error;
 use std::{
-    io::{ErrorKind, Write},
+    io::{ErrorKind, Write, Read},
     thread::sleep,
     time::Duration,
 };
@@ -53,7 +53,7 @@ impl HandshakeClient {
         }
     }
 
-    pub fn handshake<S: Transport>(mut self, mut stream: S) -> Result<WebSocket<S>, HandshakeError> {
+    pub fn handshake<Stream: Transport>(mut self, mut stream: MaybeTlsStream<Stream>) -> Result<WebSocket<Stream>, HandshakeError> {
         loop {
             match &mut self.state {
                 HandshakeState::Sending { request, offset } => {
@@ -112,7 +112,6 @@ impl HandshakeClient {
                             Status::Complete(id) => id,
                             Status::Partial => return Err(HandshakeError::Incomplete),
                         };
-
 
                         // Check for Connection and Upgrade header
                         let code = parsed.code.unwrap_or(0);

@@ -1,9 +1,9 @@
-use std::{net::TcpStream, time::Duration};
+use std::{io::{Read, Write}, net::TcpStream};
 
 use crate::{frame::Frame, handshake::HandshakeClient};
+use native_tls::{TlsConnector, TlsStream};
 use thiserror::Error;
-use tungstenite::http::HeaderMap;
-use url::Url;
+use url::{Host, Url};
 use crate::{
     error::StreamError,
     message::Message,
@@ -21,13 +21,15 @@ pub enum SocketState {
 
 #[allow(dead_code)]
 pub struct WebSocket<T: Transport> {
-    inner: Framed<T>,
+    inner: Framed<MaybeTlsStream<T>>,
     state: SocketState,
 }
 
+// impl<Stream> Transport for MaybeTlsStream<Stream> {}
+
 #[allow(dead_code)]
 impl<T: Transport> WebSocket<T> {
-    pub fn new(framed: Framed<T>) -> Self {
+    pub fn new(framed: Framed<MaybeTlsStream<T>>) -> Self {
         Self {
             inner: framed,
             state: SocketState::Init,
@@ -61,58 +63,106 @@ impl<T: Transport> WebSocket<T> {
     }
 }
 
-#[allow(dead_code)]
-pub struct ClientBuilder {
-    url: Url,
-    timeout: Duration,
-    tls: bool,
-    headers: HeaderMap,
+pub enum MaybeTlsStream<Stream> 
+where 
+    Stream: Transport
+{
+    Plain(Stream),
+    Tls(TlsStream<Stream>)
 }
 
-#[allow(dead_code)]
-impl ClientBuilder {
-    pub fn new(url: &str) -> Result<Self, ParseError> {
-        let url = Url::parse(url)?;
 
-        match url.scheme() {
-            "ws" | "wss" => {}
-            _ => return Err(ParseError::UnsupportedScheme(url.scheme().into())),
+impl<Stream> Read for MaybeTlsStream<Stream>
+where 
+    Stream: Transport
+{
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            MaybeTlsStream::Plain(plain) => plain.read(buf),
+            MaybeTlsStream::Tls(tls) => tls.read(buf)
         }
+    }   
+}
 
-        let headers = HeaderMap::new();
-
-        Ok(Self {
-            url: url.clone(),
-            timeout: Duration::from_secs(5),
-            tls: url.scheme() == "wss",
-            headers,
-        })
+impl<Stream> Write for MaybeTlsStream<Stream>
+where 
+    Stream: Transport
+{
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            MaybeTlsStream::Plain(plain) => plain.write(buf),
+            MaybeTlsStream::Tls(tls) => tls.write(buf)
+        }
     }
 
-    // pub fn timeout(mut self, d: Duration) -> Self {
-    //     self.timeout = d;
-    //     self
-    // }
-
-    // pub fn header(self, name: &str, value: &str) -> Self {
-    //     // TOPO
-    //     self
-    // }
-
-    pub fn connect(self) -> Result<WebSocket<impl Transport>, StreamError> {
-        let host = self.url.host().unwrap();
-        let port = self.url.port().unwrap();
-
-        let endpoint = format!("{}:{}", host, port);
-        info!("Endpoint to connect: {}", endpoint);
-
-        let stream = TcpStream::connect(endpoint.clone()).unwrap();
-        info!("Setting stream as non blocking...");
-        stream.set_nonblocking(true).unwrap();
-
-        let machine = HandshakeClient::new(&endpoint);
-        return Ok(machine.handshake(stream)?)
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            MaybeTlsStream::Plain(plain) => plain.flush(),
+            MaybeTlsStream::Tls(tls) => tls.flush(),
+        }
     }
+}
+
+// impl<T: Read + Write> Transport for MaybeTlsStream<T> {}
+
+pub fn connect(url: Url) -> Result<WebSocket<impl Transport>, StreamError> {
+    println!("Endpoint: {}", url);
+
+    let host = url.host().expect("Host not found");
+
+    let host_str = match host {
+        Host::Domain(domain) => domain.to_string(),
+        Host::Ipv4(ip) => ip.to_string(),
+        Host::Ipv6(ip) => ip.to_string(),
+    };
+
+    let scheme = url.scheme();
+    
+    let port = if let Some(p) = url.port() {
+        p
+    } else {
+        match scheme {
+            "ws" => 80,
+            "wss" => 443,
+            _ => unimplemented!(),
+        }
+    };
+
+    let query = match url.query() {
+        Some(q) => q,
+        None => ""
+    };
+   
+    let endpoint = format!("{}:{}{}", host, port, query);
+    info!("Endpoint to connect: {}", endpoint);
+
+    //let stream = TcpStream::connect(endpoint.clone()).unwrap();
+
+    let stream = match scheme {
+        "ws" => {
+            let stream = TcpStream::connect(endpoint.clone()).unwrap();
+            let _ = stream.set_nonblocking(true);
+            info!("Starting Plain stream");
+            MaybeTlsStream::Plain(stream)
+        },
+        "wss" => {
+            let connector = TlsConnector::new().unwrap();
+            let stream = TcpStream::connect(endpoint.clone()).unwrap();
+            let _ = stream.set_nonblocking(true);
+            let tls_stream = connector.connect(host_str.as_str(), stream).unwrap();
+            info!("Starting Tls stream");
+            MaybeTlsStream::Tls(tls_stream)
+        },
+        &_ => todo!(),
+    };
+
+    // info!("Setting stream as non blocking...");
+    // stream.set_nonblocking(true).unwrap();
+
+    let machine = HandshakeClient::new(&endpoint);
+
+    info!("Starting handshake");
+    return Ok(machine.handshake(stream)?)
 }
 
 #[derive(Error, Debug)]
