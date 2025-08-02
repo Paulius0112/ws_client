@@ -22,6 +22,12 @@ pub enum HandshakeState {
     Done,
 }
 
+pub enum HandshakeProgress<Ws> {
+    Pending,
+    Complete(Ws),
+    Error(HandshakeError)
+}
+
 pub struct HandshakeClient {
     state: HandshakeState,
     sec_key: String
@@ -50,6 +56,147 @@ impl HandshakeClient {
         HandshakeClient {
             state: HandshakeState::Sending { request, offset: 0 },
             sec_key
+        }
+    }
+
+    fn parse_response(buf: &[u8], sec_key: &str) -> Result<(), HandshakeError> {
+        const GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
+        let mut headers = [httparse::EMPTY_HEADER; 32];
+        let mut parsed = Response::new(
+            &mut headers
+        );
+
+        let status = parsed.parse(&buf).unwrap();
+        let _body_start = match status {
+            Status::Complete(id) => id,
+            Status::Partial => return Err(HandshakeError::Incomplete),
+        };
+
+        // Check for Connection and Upgrade header
+        let code = parsed.code.unwrap_or(0);
+        if code != 101 {
+            return Err(HandshakeError::BadStatus)
+        }
+
+        let accept_hdr = parsed.headers
+            .iter()
+            .find(|k| k.name == "sec-websocket-accept")
+            .ok_or(HandshakeError::MissingAcceptHeader)?;
+
+        let mut hasher = sha1::Sha1::new();
+        hasher.update(self.sec_key.as_bytes());
+        hasher.update(GUID.as_bytes());
+
+        let expected = base64::engine::general_purpose::STANDARD.encode(&hasher.finalize());
+
+        let actual = std::str::from_utf8(accept_hdr.value)
+            .map_err(|_| HandshakeError::BadAccept)?;
+        if actual != expected {
+            return Err(HandshakeError::BadAccept);
+        }
+
+        Ok(())
+
+    }
+
+    pub fn poll_once<Stream: Transport>(mut self, mut stream: MaybeTlsStream<Stream>) -> HandshakeProgress<WebSocket<Stream>> {
+        match &mut self.state {
+            HandshakeState::Sending { request, offset } => {
+                match stream.write(&request[*offset..]) {
+                    Ok(0) => {
+                        return HandshakeProgress::Error(HandshakeError::ConnectionClosed);
+                    }
+                    Ok(n) => {
+                        *offset += n;
+                        info!("Sent {} bytes of {}", *offset, request.len());
+                        if *offset >= request.len() {
+                            self.state = HandshakeState::Flushing;
+                        }
+                        return HandshakeProgress::Pending;
+                    }
+                    Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
+                        return HandshakeProgress::Pending;
+                    }
+                    Err(e) => return HandshakeProgress::Error(HandshakeError::Io(e)),
+                }
+            },
+            HandshakeState::Flushing => {
+                match stream.flush() {
+                    Ok(()) => {
+                        self.state = HandshakeState::Receiving { buf: BytesMut::with_capacity(1024) };
+                        HandshakeProgress::Pending
+                    }
+                    Err(ref e) if e.kind() == ErrorKind::WouldBlock => HandshakeProgress::Pending,
+                    Err(e) => HandshakeProgress::Error(HandshakeError::Io(e)),
+                }
+            },
+            HandshakeState::Receiving { buf } => {
+                let mut tmp = [0_u8; 1024];
+                match stream.read(&mut tmp) {
+                    Ok(0) => return HandshakeProgress::Error(HandshakeError::ConnectionClosed),
+                    Ok(n) => {
+                        buf.extend_from_slice(&tmp[..n]);
+                        info!("Received {} bytes", n);
+
+                        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                            
+                        }
+                        
+                    }
+                    Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
+                        return HandshakeProgress::Pending
+                    }
+                    Err(e) => return HandshakeProgress::Error(HandshakeError::Io(e)),
+                }
+
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    info!("End of handshake response detected");
+                    const GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
+                    let mut headers = [httparse::EMPTY_HEADER; 32];
+                    let mut parsed = Response::new(
+                        &mut headers
+                    );
+
+                    let status = parsed.parse(&buf).unwrap();
+                    let _body_start = match status {
+                        Status::Complete(id) => id,
+                        Status::Partial => return Err(HandshakeError::Incomplete),
+                    };
+
+                    // Check for Connection and Upgrade header
+                    let code = parsed.code.unwrap_or(0);
+                    if code != 101 {
+                        return Err(HandshakeError::BadStatus)
+                    }
+
+                    let accept_hdr = parsed.headers
+                        .iter()
+                        .find(|k| k.name == "sec-websocket-accept")
+                        .ok_or(HandshakeError::MissingAcceptHeader)?;
+
+                    let mut hasher = sha1::Sha1::new();
+                    hasher.update(self.sec_key.as_bytes());
+                    hasher.update(GUID.as_bytes());
+
+                    let expected = base64::engine::general_purpose::STANDARD.encode(&hasher.finalize());
+
+                    let actual = std::str::from_utf8(accept_hdr.value)
+                        .map_err(|_| HandshakeError::BadAccept)?;
+                    if actual != expected {
+                        return Err(HandshakeError::BadAccept);
+                    }
+
+                    self.state = HandshakeState::Done;
+                }
+            }
+
+            HandshakeState::Done => {
+                let framed = Framed::new(stream);
+                return Ok(WebSocket::new(framed));
+            }
+
         }
     }
 
