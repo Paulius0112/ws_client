@@ -1,15 +1,15 @@
-use std::{io::{Read, Write}, net::TcpStream};
+use std::{io::{Read, Write}, net::{SocketAddr, TcpStream, ToSocketAddrs}};
 
-use crate::{frame::Frame, handshake::HandshakeClient};
-use native_tls::{TlsConnector, TlsStream};
+use crate::{frame::Frame, handshake::{HandshakeClient, HandshakeProgress}};
+use native_tls::{HandshakeError, MidHandshakeTlsStream, TlsConnector, TlsStream};
 use thiserror::Error;
 use url::{Host, Url};
 use crate::{
     error::StreamError,
     message::Message,
-    transport::{Framed, Transport},
+    transport::Framed,
 };
-use log::info;
+use log::{info, warn};
 
 #[allow(dead_code)]
 pub enum SocketState {
@@ -20,23 +20,176 @@ pub enum SocketState {
 }
 
 #[allow(dead_code)]
-pub struct WebSocket<T: Transport> {
-    inner: Framed<MaybeTlsStream<T>>,
+pub struct WebSocket {
+    inner: Framed<MaybeTlsStream>,
     state: SocketState,
 }
 
-// impl<Stream> Transport for MaybeTlsStream<Stream> {}
+pub struct ConnectionClient {
+    url: Url,
+    socket: SocketAddr,
+    state: ConnectionPhase,
+    host_str: String,
+    connector: TlsConnector,
+    pending_tls: Option<MidHandshakeTlsStream<TcpStream>>,
+    pending_handshake: Option<HandshakeClient>,
+}
+enum ConnectionPhase {
+    TcpConnecting,
+    TlsHandshaking,
+    WebSocketHandshaking,
+    Done,
+    Failed(StreamError),
+}
+
+
+pub fn connect(url: Url) -> Result<WebSocket, StreamError> {
+    let host = url.host().expect("Host not found");
+
+    let host_str = match host {
+        Host::Domain(domain) => domain.to_string(),
+        Host::Ipv4(ip) => ip.to_string(),
+        Host::Ipv6(ip) => ip.to_string(),
+    };
+
+    let scheme = url.scheme();
+    
+    let port = if let Some(p) = url.port() {
+        p
+    } else {
+        match scheme {
+            "ws" => 80,
+            "wss" => 443,
+            _ => unimplemented!(),
+        }
+    };
+
+    let _query = match url.query() {
+        Some(q) => q,
+        None => ""
+    };
+   
+    let socket = format!("{}:{}", host, port)
+        .to_socket_addrs()?
+        .next()
+        .ok_or(StreamError::DnsResolve)?;
+
+    let connector = TlsConnector::new().unwrap();
+
+    let mut client = ConnectionClient {
+        url: url,
+        host_str: host_str,
+        socket,
+        connector,
+        state: ConnectionPhase::TcpConnecting,
+        pending_tls: None,
+        pending_handshake: None,
+    };
+
+    loop {
+        match client.poll_once() {
+            Some(Ok(ws)) => return Ok(ws),
+            Some(Err(e)) => return Err(e),
+            None => {
+                // we shouldn't sleep here in prod. Just for simulation
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+    }
+}
+
+// TODO:
+// Return maybe status instead of none?
+// Update error types
+
+impl ConnectionClient {
+    pub fn poll_once(&mut self) -> Option<Result<WebSocket, StreamError>> {
+        match self.state {
+            ConnectionPhase::TcpConnecting => {
+                let stream = TcpStream::connect(self.socket).expect("Failed to initialise stream");
+                stream.set_nonblocking(true).expect("Failed to set stream to nonblocking mode");
+
+                if self.url.scheme() == "wss" {
+                    info!("Opening secury websocket stream");
+
+                    match self.connector.connect(&self.host_str, stream) {
+                        Ok(tls) => {
+                            self.pending_handshake = Some(HandshakeClient::new(&self.url, MaybeTlsStream::Tls(tls)));
+                            self.state = ConnectionPhase::WebSocketHandshaking;
+                        }
+                        Err(HandshakeError::WouldBlock(mid)) => {
+                            self.pending_tls = Some(mid);
+                            self.state = ConnectionPhase::TlsHandshaking;
+                        }
+                        Err(e) => {
+                            warn!("Tcp connection failed: {}", e);
+                            self.state = ConnectionPhase::Failed(StreamError::TcpConnection);
+                        }
+                    }
+                } else {
+                    info!("Opening plain websocket stream");
+                    self.pending_handshake = Some(HandshakeClient::new(&self.url, MaybeTlsStream::Plain(stream)));
+                    self.state = ConnectionPhase::WebSocketHandshaking;
+                }
+
+                None
+            }
+
+            ConnectionPhase::TlsHandshaking => {
+                if let Some(mid) = self.pending_tls.take() {
+                    match mid.handshake() {
+                        Ok(tls) => {
+                            self.pending_handshake = Some(HandshakeClient::new(&self.url, MaybeTlsStream::Tls(tls)));
+                            self.state = ConnectionPhase::WebSocketHandshaking;
+                        }
+                        Err(HandshakeError::WouldBlock(mh)) => {
+                            self.pending_tls = Some(mh);
+                        }
+                        Err(e) => {
+                            warn!("Failed TLS handshake: {}", e);
+                            self.state = ConnectionPhase::Failed(StreamError::TlsHandshake);
+                        }
+                    }
+                }
+                None
+            }
+
+            ConnectionPhase::WebSocketHandshaking => {
+                if let Some(handshaker) = &mut self.pending_handshake {
+                    match handshaker.poll_once() {
+                        HandshakeProgress::Pending => None,
+                        HandshakeProgress::Complete(ws) => {
+                            self.state = ConnectionPhase::Done;
+                            Some(Ok(ws))
+                        }
+                        HandshakeProgress::Error(e) => {
+                            warn!("Failed handshake: {}", e);
+                            self.state = ConnectionPhase::Failed(StreamError::Handshake(e));
+                            
+                            Some(Err(StreamError::TlsHandshake))
+                        }
+                    }
+                } else {
+                    None
+                }
+            }
+
+            ConnectionPhase::Failed(ref e) => Some(Err(StreamError::TlsHandshake)),
+            ConnectionPhase::Done => None,
+        }
+    }
+
+}
 
 #[allow(dead_code)]
-impl<T: Transport> WebSocket<T> {
-    pub fn new(framed: Framed<MaybeTlsStream<T>>) -> Self {
+impl WebSocket {
+    pub fn new(framed: Framed<MaybeTlsStream>) -> Self {
         Self {
             inner: framed,
             state: SocketState::Init,
         }
     }
 
-    // receive and close funcs
     pub fn send(&mut self, msg: Message) {
         let frame = match msg {
             Message::Text(string) => Frame::text(string),
@@ -63,18 +216,14 @@ impl<T: Transport> WebSocket<T> {
     }
 }
 
-pub enum MaybeTlsStream<Stream> 
-where 
-    Stream: Transport
+pub enum MaybeTlsStream 
 {
-    Plain(Stream),
-    Tls(TlsStream<Stream>)
+    Plain(TcpStream),
+    Tls(TlsStream<TcpStream>)
 }
 
 
-impl<Stream> Read for MaybeTlsStream<Stream>
-where 
-    Stream: Transport
+impl Read for MaybeTlsStream
 {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         match self {
@@ -84,9 +233,7 @@ where
     }   
 }
 
-impl<Stream> Write for MaybeTlsStream<Stream>
-where 
-    Stream: Transport
+impl Write for MaybeTlsStream
 {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         match self {
@@ -103,73 +250,9 @@ where
     }
 }
 
-// impl<T: Read + Write> Transport for MaybeTlsStream<T> {}
-
-pub fn connect(url: Url) -> Result<WebSocket<impl Transport>, StreamError> {
-    println!("Endpoint: {}", url);
-
-    let host = url.host().expect("Host not found");
-
-    let host_str = match host {
-        Host::Domain(domain) => domain.to_string(),
-        Host::Ipv4(ip) => ip.to_string(),
-        Host::Ipv6(ip) => ip.to_string(),
-    };
-
-    let scheme = url.scheme();
-    
-    let port = if let Some(p) = url.port() {
-        p
-    } else {
-        match scheme {
-            "ws" => 80,
-            "wss" => 443,
-            _ => unimplemented!(),
-        }
-    };
-
-    let query = match url.query() {
-        Some(q) => q,
-        None => ""
-    };
-   
-    let endpoint = format!("{}:{}{}", host, port, query);
-    info!("Endpoint to connect: {}", endpoint);
-
-    //let stream = TcpStream::connect(endpoint.clone()).unwrap();
-
-    let stream = match scheme {
-        "ws" => {
-            let stream = TcpStream::connect(endpoint.clone()).unwrap();
-            let _ = stream.set_nonblocking(true);
-            info!("Starting Plain stream");
-            MaybeTlsStream::Plain(stream)
-        },
-        "wss" => {
-            let connector = TlsConnector::new().unwrap();
-            let stream = TcpStream::connect(endpoint.clone()).unwrap();
-            let _ = stream.set_nonblocking(true);
-            let tls_stream = connector.connect(host_str.as_str(), stream).unwrap();
-            info!("Starting Tls stream");
-            MaybeTlsStream::Tls(tls_stream)
-        },
-        &_ => todo!(),
-    };
-
-    // info!("Setting stream as non blocking...");
-    // stream.set_nonblocking(true).unwrap();
-
-    let machine = HandshakeClient::new(&endpoint);
-
-    info!("Starting handshake");
-    return Ok(machine.handshake(stream)?)
-}
 
 #[derive(Error, Debug)]
 pub enum ParseError {
     #[error("URL parse error: {0}")]
     Url(#[from] url::ParseError),
-
-    #[error("Unsupported scheme: {0}")]
-    UnsupportedScheme(String),
 }

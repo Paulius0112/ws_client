@@ -19,14 +19,15 @@ fn main() -> std::io::Result<()> {
     //let client = ClientBuilder::new("ws://54.92.63.182:80/ws/bnbusdt@aggTrade").unwrap();
     //let url = Url::from_str("ws://localhost:3012/tesitng@/test").unwrap();
     let url = Url::from_str("wss://fstream.binance.com/ws/bnbusdt@aggTrade").unwrap();
+    //let url = Url::from_str("wss://54.92.63.182/ws/bnbusdt@aggTrade").unwrap();
     let mut stream = connect(url).unwrap();
 
-    let msg = "Hello from custom client".to_string();
+    // let msg = "Hello from custom client".to_string();
 
-    let msg = Message::Text(msg);
+    // let msg = Message::Text(msg);
 
-    info!("Sending initial message");
-    stream.send(msg);
+    // info!("Sending initial message");
+    // stream.send(msg);
 
     loop {
         let msg = stream.recv().unwrap();

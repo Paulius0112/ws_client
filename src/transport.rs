@@ -98,7 +98,6 @@ impl<T: Transport> Framed<T> {
 #[allow(dead_code)]
 impl<S: Transport> Framed<S> {
     pub fn new(stream: S) -> Self {
-        // lets set non blocking stream
         Self {
             stream,
             read_buf: Vec::new(),
