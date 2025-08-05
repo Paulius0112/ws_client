@@ -1,14 +1,12 @@
 use crate::{
-    client::{MaybeTlsStream, WebSocket},
-    transport::Framed,
+    handshake::error::HandshakeError, transport::Framed, websocket::{MaybeTlsStream, WebSocket}
 };
 use base64::Engine;
 use bytes::BytesMut;
 use httparse::{Response, Status};
-use log::info;
+use log::debug;
 use rand::Rng;
 use sha1::Digest;
-use thiserror::Error;
 use std::{
     io::{ErrorKind, Write, Read},
 };
@@ -119,7 +117,7 @@ impl HandshakeClient {
                     }
                     Ok(n) => {
                         *offset += n;
-                        info!("Sent {} bytes of {}", *offset, request.len());
+                        debug!("Sent {} bytes of {}", *offset, request.len());
                         if *offset >= request.len() {
                             self.state = HandshakeState::Flushing;
                         }
@@ -167,34 +165,5 @@ impl HandshakeClient {
                 }
             }
         }
-    }
-}
-
-
-
-#[derive(Debug, Error)]
-pub enum HandshakeError {
-    #[error("Handshake response was incomplete")]
-    Incomplete,
-
-    #[error("Bad status code from the server")]
-    BadStatus,
-
-    #[error("Server closed the connection")]
-    ConnectionClosed,
-
-    #[error("I/O error: {0}")]
-    Io(#[source] std::io::Error),
-
-    #[error("Missing accept header in handshake response")]
-    MissingAcceptHeader,
-
-    #[error("Handshake response contains invalid security key")]
-    BadAccept
-}
-
-impl From<std::io::Error> for HandshakeError {
-    fn from(e: std::io::Error) -> Self {
-        HandshakeError::Io(e)
     }
 }

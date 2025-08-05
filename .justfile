@@ -1,4 +1,9 @@
 
+build:
+  cargo build
+
+bench:
+  cargo bench
 
 server:
   RUST_LOG=trace cargo run --example server

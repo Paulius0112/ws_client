@@ -5,7 +5,7 @@ use crate::{
     frame::{Frame, FrameError},
 };
 use rand::random;
-use log::info;
+use log::{debug, info};
 use std::io::ErrorKind;
 
 
@@ -45,7 +45,7 @@ impl<T: Transport> Framed<T> {
                     return Ok(None)
                 }
                 Ok(n) => {
-                    info!("Read {} bytes from socket", n);
+                    debug!("Read {} bytes from socket", n);
 
                     self.raw_buf.extend_from_slice(&tmp[..n]);
                 }
@@ -54,7 +54,7 @@ impl<T: Transport> Framed<T> {
                     return Ok(None)
                 }
                 Err(e) => {
-                    info!("Error reading next frame: {}", e);
+                    debug!("Error reading next frame: {}", e);
                 }
             }
 
@@ -62,18 +62,17 @@ impl<T: Transport> Framed<T> {
             if self.raw_buf.len() >= MIN_HEADER_SIZE {
                 match Frame::try_parse(&self.raw_buf) {
                     Ok(frame) => {
-                        info!("Frame was successfully parsed!");
+                        debug!("Frame was successfully parsed!");
                         self.read_buf.extend_from_slice(&frame.payload);
                         self.raw_buf.clear();
 
                         if !frame.fin {
-                            info!("FIN=0, this is not the last frame");
+                            debug!("FIN=0, this is not the last frame");
                             return Ok(None);
                         }
 
                         let len = self.read_buf.len();
 
-                        // We have full frame. Return upstream
                         let full_frame = Frame {
                             fin: true,
                             opcode: frame.opcode,
@@ -86,7 +85,7 @@ impl<T: Transport> Framed<T> {
                         return Ok(Some(full_frame));
                     }
                     Err(e) => {
-                        info!("Error parsing frame: {}", e);
+                        debug!("Error parsing frame: {}", e);
                         return Err(e);
                     }
                 }
