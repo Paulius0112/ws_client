@@ -99,6 +99,7 @@ impl ConnectionClient {
                 debug!("TcpConnecting");
                 let stream = TcpStream::connect(self.socket).expect("Failed to initialise stream");
                 stream.set_nonblocking(true).expect("Failed to set stream to nonblocking mode");
+                stream.set_nodelay(true).expect("Failed to set TCP_NODELAY");
 
                 if self.scheme == SchemeType::WSS {
                     info!("Opening secure websocket stream");
